@@ -96,7 +96,7 @@ public partial class FusionCache
 		// TAGGING
 		if (memoryEntry is not null)
 		{
-			(memoryEntry, memoryEntryIsValid) = CheckEntrySecondaryExpiration(operationId, key, memoryEntry, false, token);
+			(memoryEntry, memoryEntryIsValid) = CheckEntrySecondaryExpiration<IFusionCacheMemoryEntry, TValue>(operationId, key, memoryEntry, false, options, token);
 		}
 
 		if (memoryEntryIsValid)
@@ -169,7 +169,7 @@ public partial class FusionCache
 			// TAGGING
 			if (memoryEntry is not null)
 			{
-				(memoryEntry, memoryEntryIsValid) = CheckEntrySecondaryExpiration(operationId, key, memoryEntry, false, token);
+				(memoryEntry, memoryEntryIsValid) = CheckEntrySecondaryExpiration<IFusionCacheMemoryEntry, TValue>(operationId, key, memoryEntry, false, options, token);
 			}
 
 			if (memoryEntryIsValid)
@@ -201,7 +201,7 @@ public partial class FusionCache
 			// TAGGING (DISTRIBUTED)
 			if (distributedEntry is not null)
 			{
-				(distributedEntry, distributedEntryIsValid) = CheckEntrySecondaryExpiration(operationId, key, distributedEntry, false, token);
+				(distributedEntry, distributedEntryIsValid) = CheckEntrySecondaryExpiration<FusionCacheDistributedEntry<TValue>, TValue>(operationId, key, distributedEntry, false, options, token);
 			}
 
 			if (distributedEntryIsValid)
@@ -484,7 +484,7 @@ public partial class FusionCache
 		// TAGGING
 		if (memoryEntry is not null)
 		{
-			(memoryEntry, memoryEntryIsValid) = CheckEntrySecondaryExpiration(operationId, key, memoryEntry, true, token);
+			(memoryEntry, memoryEntryIsValid) = CheckEntrySecondaryExpiration<IFusionCacheMemoryEntry, TValue>(operationId, key, memoryEntry, true, options, token);
 		}
 
 		if (memoryEntryIsValid)
@@ -532,7 +532,7 @@ public partial class FusionCache
 		// TAGGING
 		if (distributedEntry is not null)
 		{
-			(distributedEntry, distributedEntryIsValid) = CheckEntrySecondaryExpiration(operationId, key, distributedEntry, false, token);
+			(distributedEntry, distributedEntryIsValid) = CheckEntrySecondaryExpiration<FusionCacheDistributedEntry<TValue>, TValue>(operationId, key, distributedEntry, false, options, token);
 		}
 
 		if (distributedEntryIsValid)
@@ -803,7 +803,8 @@ public partial class FusionCache
 
 	// EXPIRE
 
-	private void ExpireInternal(string key, FusionCacheEntryOptions options, CancellationToken token = default)
+	private void ExpireInternal<TEntry, TValue>(string key, FusionCacheEntryOptions options, TEntry? entry, CancellationToken token = default)
+		where TEntry : class, IFusionCacheEntry
 	{
 		var operationId = MaybeGenerateOperationId();
 
@@ -822,7 +823,7 @@ public partial class FusionCache
 
 			if (RequiresDistributedOperations(options))
 			{
-				DistributedExpireEntry(operationId, key, options, token);
+				DistributedExpireEntry<TEntry, TValue>(operationId, key, options, entry, token);
 			}
 
 			// EVENT
@@ -849,12 +850,12 @@ public partial class FusionCache
 
 		token.ThrowIfCancellationRequested();
 
-		ExpireInternal(key, options, token);
+		ExpireInternal<IFusionCacheEntry, object?>(key, options, null, token);
 	}
 
 	// TAGGING
 
-	private (TEntry? Entry, bool isValid) CheckEntrySecondaryExpiration<TEntry>(string operationId, string key, TEntry? entry, bool executeCascadeAction, CancellationToken token)
+	private (TEntry? Entry, bool isValid) CheckEntrySecondaryExpiration<TEntry, TValue>(string operationId, string key, TEntry? entry, bool executeCascadeAction, FusionCacheEntryOptions options, CancellationToken token)
 		where TEntry : class, IFusionCacheEntry
 	{
 		if (entry is null)
@@ -924,7 +925,7 @@ public partial class FusionCache
 					if (_logger?.IsEnabled(LogLevel.Trace) ?? false)
 						_logger.Log(LogLevel.Trace, "FUSION [N={CacheName} I={CacheInstanceId}] (O={CacheOperationId} K={CacheKey}): cascade expire entry", CacheName, InstanceId, operationId, key);
 
-					ExpireInternal(key, _cascadeRemoveByTagEntryOptions, token);
+					ExpireInternal<TEntry, TValue>(key, options, entry, token);
 
 					return (entry, false);
 				}
@@ -969,7 +970,7 @@ public partial class FusionCache
 			if (_logger?.IsEnabled(LogLevel.Trace) ?? false)
 				_logger.Log(LogLevel.Trace, "FUSION [N={CacheName} I={CacheInstanceId}] (O={CacheOperationId} K={CacheKey}): cascade expire entry", CacheName, InstanceId, operationId, key);
 
-			ExpireInternal(key, _cascadeRemoveByTagEntryOptions, token);
+			ExpireInternal<TEntry, TValue>(key, options, entry, token);
 
 			return (entry, false);
 		}
@@ -1234,7 +1235,8 @@ public partial class FusionCache
 		);
 	}
 
-	private void DistributedExpireEntry(string operationId, string key, FusionCacheEntryOptions options, CancellationToken token)
+	private void DistributedExpireEntry<TEntry, TValue>(string operationId, string key, FusionCacheEntryOptions options, TEntry? entry, CancellationToken token)
+		where TEntry : class, IFusionCacheEntry
 	{
 		var now = FusionCacheInternalUtils.GetCurrentTimestamp();
 		ExecuteDistributedAction(
@@ -1244,11 +1246,13 @@ public partial class FusionCache
 			now,
 			(dca, isBackground, ct) =>
 			{
-				if (options.IsFailSafeEnabled)
+				if (options.IsFailSafeEnabled && entry is not null)
 				{
-					return true;
+					var newOptions = options.Duplicate();
+					newOptions.DistributedCacheDuration = TimeSpan.Zero;
+					return dca.SetEntry<TValue>(operationId, key, entry, newOptions, isBackground, ct);
 				}
-				
+
 				return dca.RemoveEntry(operationId, key, options, isBackground, ct);
 			},
 			(bpa, isBackground, ct) =>

@@ -96,7 +96,7 @@ public partial class FusionCache
 		// TAGGING
 		if (memoryEntry is not null)
 		{
-			(memoryEntry, memoryEntryIsValid) = await CheckEntrySecondaryExpirationAsync(operationId, key, memoryEntry, false, token).ConfigureAwait(false);
+			(memoryEntry, memoryEntryIsValid) = await CheckEntrySecondaryExpirationAsync<IFusionCacheMemoryEntry, TValue>(operationId, key, memoryEntry, false, options, token).ConfigureAwait(false);
 		}
 
 		if (memoryEntryIsValid)
@@ -169,7 +169,7 @@ public partial class FusionCache
 			// TAGGING
 			if (memoryEntry is not null)
 			{
-				(memoryEntry, memoryEntryIsValid) = await CheckEntrySecondaryExpirationAsync(operationId, key, memoryEntry, false, token).ConfigureAwait(false);
+				(memoryEntry, memoryEntryIsValid) = await CheckEntrySecondaryExpirationAsync<IFusionCacheMemoryEntry, TValue>(operationId, key, memoryEntry, false, options, token).ConfigureAwait(false);
 			}
 
 			if (memoryEntryIsValid)
@@ -201,7 +201,7 @@ public partial class FusionCache
 			// TAGGING (DISTRIBUTED)
 			if (distributedEntry is not null)
 			{
-				(distributedEntry, distributedEntryIsValid) = await CheckEntrySecondaryExpirationAsync(operationId, key, distributedEntry, false, token).ConfigureAwait(false);
+				(distributedEntry, distributedEntryIsValid) = await CheckEntrySecondaryExpirationAsync<FusionCacheDistributedEntry<TValue>, TValue>(operationId, key, distributedEntry, false, options, token).ConfigureAwait(false);
 			}
 
 			if (distributedEntryIsValid)
@@ -484,7 +484,7 @@ public partial class FusionCache
 		// TAGGING
 		if (memoryEntry is not null)
 		{
-			(memoryEntry, memoryEntryIsValid) = await CheckEntrySecondaryExpirationAsync(operationId, key, memoryEntry, true, token).ConfigureAwait(false);
+			(memoryEntry, memoryEntryIsValid) = await CheckEntrySecondaryExpirationAsync<IFusionCacheMemoryEntry, TValue>(operationId, key, memoryEntry, true, options, token).ConfigureAwait(false);
 		}
 
 		if (memoryEntryIsValid)
@@ -532,7 +532,7 @@ public partial class FusionCache
 		// TAGGING
 		if (distributedEntry is not null)
 		{
-			(distributedEntry, distributedEntryIsValid) = await CheckEntrySecondaryExpirationAsync(operationId, key, distributedEntry, true, token).ConfigureAwait(false);
+			(distributedEntry, distributedEntryIsValid) = await CheckEntrySecondaryExpirationAsync<FusionCacheDistributedEntry<TValue>, TValue>(operationId, key, distributedEntry, true, options, token).ConfigureAwait(false);
 		}
 
 		if (distributedEntryIsValid)
@@ -803,7 +803,8 @@ public partial class FusionCache
 
 	// EXPIRE
 
-	private async ValueTask ExpireInternalAsync(string key, FusionCacheEntryOptions options, CancellationToken token = default)
+	private async ValueTask ExpireInternalAsync<TEntry, TValue>(string key, FusionCacheEntryOptions options, TEntry? entry, CancellationToken token = default)
+		where TEntry : class, IFusionCacheEntry
 	{
 		var operationId = MaybeGenerateOperationId();
 
@@ -822,7 +823,7 @@ public partial class FusionCache
 
 			if (RequiresDistributedOperations(options))
 			{
-				await DistributedExpireEntryAsync(operationId, key, options, token).ConfigureAwait(false);
+				await DistributedExpireEntryAsync<TEntry, TValue>(operationId, key, options, entry, token).ConfigureAwait(false);
 			}
 
 			// EVENT
@@ -849,12 +850,12 @@ public partial class FusionCache
 
 		token.ThrowIfCancellationRequested();
 
-		await ExpireInternalAsync(key, options, token).ConfigureAwait(false);
+		await ExpireInternalAsync<IFusionCacheEntry, object?>(key, options, null, token).ConfigureAwait(false);
 	}
 
 	// TAGGING
 
-	private async ValueTask<(TEntry? Entry, bool isValid)> CheckEntrySecondaryExpirationAsync<TEntry>(string operationId, string key, TEntry? entry, bool executeCascadeAction, CancellationToken token)
+	private async ValueTask<(TEntry? Entry, bool isValid)> CheckEntrySecondaryExpirationAsync<TEntry, TValue>(string operationId, string key, TEntry? entry, bool executeCascadeAction, FusionCacheEntryOptions options, CancellationToken token)
 		where TEntry : class, IFusionCacheEntry
 	{
 		if (entry is null)
@@ -924,7 +925,7 @@ public partial class FusionCache
 					if (_logger?.IsEnabled(LogLevel.Trace) ?? false)
 						_logger.Log(LogLevel.Trace, "FUSION [N={CacheName} I={CacheInstanceId}] (O={CacheOperationId} K={CacheKey}): cascade expire entry", CacheName, InstanceId, operationId, key);
 
-					await ExpireInternalAsync(key, _cascadeRemoveByTagEntryOptions, token).ConfigureAwait(false);
+					await ExpireInternalAsync<TEntry, TValue>(key, options, entry, token).ConfigureAwait(false);
 
 					return (entry, false);
 				}
@@ -969,7 +970,7 @@ public partial class FusionCache
 			if (_logger?.IsEnabled(LogLevel.Trace) ?? false)
 				_logger.Log(LogLevel.Trace, "FUSION [N={CacheName} I={CacheInstanceId}] (O={CacheOperationId} K={CacheKey}): cascade expire entry", CacheName, InstanceId, operationId, key);
 
-			await ExpireInternalAsync(key, _cascadeRemoveByTagEntryOptions, token).ConfigureAwait(false);
+			await ExpireInternalAsync<TEntry, TValue>(key, options, entry, token).ConfigureAwait(false);
 
 			return (entry, false);
 		}
@@ -1234,7 +1235,8 @@ public partial class FusionCache
 		);
 	}
 
-	private ValueTask DistributedExpireEntryAsync(string operationId, string key, FusionCacheEntryOptions options, CancellationToken token)
+	private ValueTask DistributedExpireEntryAsync<TEntry, TValue>(string operationId, string key, FusionCacheEntryOptions options, TEntry? entry, CancellationToken token)
+		where TEntry : class, IFusionCacheEntry
 	{
 		var now = FusionCacheInternalUtils.GetCurrentTimestamp();
 		return ExecuteDistributedActionAsync(
@@ -1244,11 +1246,13 @@ public partial class FusionCache
 			now,
 			(dca, isBackground, ct) =>
 			{
-				if (options.IsFailSafeEnabled)
+				if (options.IsFailSafeEnabled && entry is not null)
 				{
-					return new ValueTask<bool>(true);
+					var newOptions = options.Duplicate();
+					newOptions.DistributedCacheDuration = TimeSpan.Zero;
+					return dca.SetEntryAsync<TValue>(operationId, key, entry, newOptions, isBackground, ct);
 				}
-				
+
 				return dca.RemoveEntryAsync(operationId, key, options, isBackground, ct);
 			},
 			(bpa, isBackground, ct) =>
